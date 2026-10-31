@@ -14,6 +14,9 @@ typedef NSArray * _Nonnull (^DYStorageSearchSectionsProvider)(NSString * _Nonnul
 - (void)refreshWithCurrentQuery;
 - (void)updateLayout;
 - (void)pageDidAppear;
+
+/// Re-resolves colors after the host app or the system switches appearance.
+- (void)hostAppearanceDidChange;
 - (void)pageDidDisappear;
 
 @end

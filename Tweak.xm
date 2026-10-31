@@ -13,6 +13,7 @@
 #import "DYStorageDeveloperScanner.h"
 #import "DYStorageSearchCatalog.h"
 #import "DYStorageSearchCoordinator.h"
+#import "DYStorageRuntimeIndex.h"
 
 #ifndef DY_STORAGE_DEBUG
 #define DY_STORAGE_DEBUG 0
@@ -28,7 +29,12 @@ static NSString *const kDYStorageHubSectionIdentifier = @"com.xlzs001.dystorage.
 static NSString *const kDYStorageHubEntryIdentifier = @"com.xlzs001.dystorage.open";
 static NSString *const kDYStorageHubContentIdentifier = @"com.xlzs001.dystorage.content";
 static NSString *const kDYStorageHubMarkerTitle = @"__DYStorage_Hub__";
-static NSString *const kDYStorageVersion = @"1.2.0";
+// control is the single source of truth: the Makefile passes the version in as
+// -DDYSTORAGE_VERSION_STRING=@"x.y.z". The fallback keeps IDE-only builds going.
+#ifndef DYSTORAGE_VERSION_STRING
+#define DYSTORAGE_VERSION_STRING @"1.3.0"
+#endif
+static NSString *const kDYStorageVersion = DYSTORAGE_VERSION_STRING;
 static NSString *const kDYStorageRepositoryURL = @"https://github.com/xlzs001/DYstorage";
 
 static void *kDYStorageViewModelAssociationKey = &kDYStorageViewModelAssociationKey;
@@ -189,6 +195,34 @@ static NSArray<NSString *> *DYStorageKnownPluginTitles(void) {
     return titles;
 }
 
+static NSString *const kDYStorageConfirmedPluginTitlesKey = @"DYStorageConfirmedPluginTitles";
+
+/// Plug-ins the user explicitly accepted from the discovery list. Keeping them
+/// in NSUserDefaults means a confirmed entry survives respring and app updates
+/// without shipping it in the hardcoded list.
+static NSArray<NSString *> *DYStorageConfirmedPluginTitles(void) {
+    id stored = [[NSUserDefaults standardUserDefaults] arrayForKey:kDYStorageConfirmedPluginTitlesKey];
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    for (id title in stored) {
+        if ([title isKindOfClass:[NSString class]] && [(NSString *)title length]) {
+            [titles addObject:title];
+        }
+    }
+    return titles;
+}
+
+static BOOL DYStorageConfirmPluginTitle(NSString *title) {
+    NSString *normalized = DYStorageNormalizedString(title);
+    if (normalized.length == 0) return NO;
+    for (NSString *existing in DYStorageConfirmedPluginTitles()) {
+        if ([DYStorageNormalizedString(existing) isEqualToString:normalized]) return NO;
+    }
+    NSMutableArray<NSString *> *titles = [DYStorageConfirmedPluginTitles() mutableCopy];
+    [titles addObject:title];
+    [[NSUserDefaults standardUserDefaults] setObject:titles forKey:kDYStorageConfirmedPluginTitlesKey];
+    return YES;
+}
+
 static NSArray<NSString *> *DYStorageTargetPluginTitles(void) {
     NSMutableArray<NSString *> *titles = [DYStorageKnownPluginTitles() mutableCopy];
     id customTitles = [[NSUserDefaults standardUserDefaults] objectForKey:@"DYStorageTargetPluginTitles"];
@@ -198,6 +232,9 @@ static NSArray<NSString *> *DYStorageTargetPluginTitles(void) {
                 [titles addObject:title];
             }
         }
+    }
+    for (NSString *confirmed in DYStorageConfirmedPluginTitles()) {
+        [titles addObject:confirmed];
     }
     return titles;
 }
@@ -224,6 +261,121 @@ static BOOL DYStorageTitleIsTargetPlugin(NSString *title) {
         }
     }
     return NO;
+}
+
+#pragma mark - Plugin discovery and runtime catalog capture
+
+/// Candidates found on the settings page that look like a third-party root
+/// entry but were never confirmed by the user. Nothing here is collected
+/// automatically: a two-row system group or a duplicated label must never end
+/// up in the organizer because of a heuristic.
+static BOOL DYStorageLooksLikeMainSettingsPage(NSArray *sections);
+static BOOL DYStorageSectionIsHub(id section);
+static BOOL DYStorageSectionIsHubContent(id section);
+
+static NSArray *gDYStorageCandidateSections = nil;
+
+static NSArray *DYStorageCandidateSections(void) {
+    return gDYStorageCandidateSections ?: @[];
+}
+
+static void DYStorageSetCandidateSections(NSArray *sections) {
+    gDYStorageCandidateSections = [sections copy];
+}
+
+/// A plug-in root entry is a one-row section whose only row repeats the section
+/// header and carries a tap block. Douyin's first-party groups never use that
+/// shape for a single row titled after a tweak, so it is a safe thing to offer.
+// Groups owned by Douyin itself. A one-row section carrying one of these
+// headers is an ordinary settings row, not an unknown plug-in entry.
+static BOOL DYStorageHeaderLooksLikeSystemGroup(NSString *header) {
+    static NSArray<NSString *> *systemHeaders = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        systemHeaders = @[@"账号", @"账户", @"account", @"general",
+                          @"通用", @"设置", @"settings",
+                          @"关于", @"about", @"隐私", @"privacy",
+                          @"通知", @"notification", @"播放", @"playback",
+                          @"存储", @"storage", @"缓存", @"cache",
+                          @"清理", @"cleanup", @"反馈", @"feedback",
+                          @"帮助", @"help", @"退出", @"logout",
+                          @"切换", @"switch", @"青少年", @"teen",
+                          @"安全", @"security", @"权限", @"permission",
+                          @"实验室", @"lab"];
+    });
+    for (NSString *candidate in systemHeaders) {
+        if ([header isEqualToString:candidate] || [header hasPrefix:candidate]) return YES;
+    }
+    return NO;
+}
+
+/// A browsable one-row section that is not one of the titles DYStorage already
+/// owns. Tier one is the exact header/title match every supported plug-in uses
+/// today; tier two catches plug-ins that group their entry under a neutral
+/// header. Both are suggestions only: the user confirms one before it becomes a
+/// collected entry.
+static BOOL DYStorageSectionLooksLikePluginEntryCandidate(id section, NSArray *items) {
+    if ([items isKindOfClass:[NSArray class]] == NO || items.count != 1) return NO;
+    id item = items.firstObject;
+    NSString *header = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
+    NSString *itemTitle = DYStorageNormalizedString(DYStorageStringValue(item, @"title"));
+    if (itemTitle.length == 0 || header.length > 24) return NO;
+    id actionObject = DYStorageValue(item, @"cellTappedBlock");
+    if ([NSStringFromClass([actionObject class]) containsString:@"Block"] == NO) return NO;
+    if (DYStorageTitleIsTargetPlugin(itemTitle)) return NO;
+    if (header.length && [header isEqualToString:itemTitle]) return YES;
+    if (header.length == 0) return NO;
+    return DYStorageHeaderLooksLikeSystemGroup(header) == NO;
+}
+
+/// Set when the user opens a captured plug-in page. The next settings view model
+/// that is neither the Douyin root nor the organizer page belongs to that
+/// plug-in, so its rows can be indexed for search.
+static NSString *gDYStorageCapturePluginTitle = nil;
+static NSTimeInterval gDYStorageCaptureDeadline = 0;
+
+static void DYStorageBeginPluginPageCapture(NSString *pluginTitle) {
+    gDYStorageCapturePluginTitle = [DYStorageNormalizedString(pluginTitle) copy];
+    gDYStorageCaptureDeadline = [[NSDate date] timeIntervalSince1970] + 8.0;
+}
+
+static void DYStorageCaptureFeaturesFromSections(NSArray *sections) {
+    NSString *plugin = gDYStorageCapturePluginTitle;
+    if (plugin.length == 0) return;
+    if ([[NSDate date] timeIntervalSince1970] > gDYStorageCaptureDeadline) {
+        gDYStorageCapturePluginTitle = nil;
+        return;
+    }
+    if ([sections isKindOfClass:[NSArray class]] == NO || sections.count == 0) return;
+    if (DYStorageLooksLikeMainSettingsPage(sections)) return;
+    // Going back to the organizer within the capture window would otherwise
+    // index DYStorage's own rows as if they belonged to the plug-in.
+    for (id section in sections) {
+        if (DYStorageSectionIsHub(section) || DYStorageSectionIsHubContent(section)) {
+            gDYStorageCapturePluginTitle = nil;
+            return;
+        }
+    }
+
+    NSMutableArray<NSDictionary *> *features = [NSMutableArray array];
+    for (id section in sections) {
+        NSString *sectionTitle = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle")) ?: @"";
+        NSArray *items = DYStorageArrayValue(section, @"itemArray");
+        for (id item in items) {
+            if ([item isKindOfClass:[NSObject class]] == NO) continue;
+            NSString *title = DYStorageNormalizedString(DYStorageStringValue(item, @"title"));
+            if (title.length == 0 || title.length > 40) continue;
+            [features addObject:@{ @"section": sectionTitle, @"title": title }];
+            if (features.count >= 400) break;
+        }
+    }
+    if (features.count < 3) return;
+    DYStorageRuntimeIndexLearn(plugin, features);
+    DYStorageLog(@"Indexed %lu features for %@", (unsigned long)features.count, plugin);
+    // Keep the marker alive for a short while so a second page of the same
+    // plug-in (tabs, detail rows) is merged too. Reopening the organizer or
+    // tapping another entry clears it.
+    gDYStorageCaptureDeadline = [[NSDate date] timeIntervalSince1970] + 4.0;
 }
 
 static BOOL DYStorageItemIsHubEntry(id item);
@@ -283,8 +435,16 @@ static NSArray *DYStorageRemoveXUUFromHubSections(NSArray *sections) {
     return cleaned ?: sections;
 }
 
+static BOOL DYStorageIsStandalonePluginEntrySection(id section, NSArray *items);
+
+// Douyin periodically renames its first settings group (account/localized).
+// A one-row section belonging to a known plugin root is a schema-independent
+// signal that this is the root settings page, so the organizer entry does not
+// disappear silently when that header changes.
 static BOOL DYStorageLooksLikeMainSettingsPage(NSArray *sections) {
     if (![sections isKindOfClass:[NSArray class]]) return NO;
+
+    BOOL sawStandalonePluginSection = NO;
 
     for (id section in sections) {
         // A hub-content VM is our secondary settings page, never the Douyin
@@ -292,6 +452,11 @@ static BOOL DYStorageLooksLikeMainSettingsPage(NSArray *sections) {
         // if another tweak has cached a previous return value.
         if (DYStorageSectionIsHubContent(section)) return NO;
         if (DYStorageSectionIsHub(section)) continue;
+
+        if (sawStandalonePluginSection == NO &&
+            DYStorageIsStandalonePluginEntrySection(section, DYStorageArrayValue(section, @"itemArray"))) {
+            sawStandalonePluginSection = YES;
+        }
 
         NSString *title = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
         if ([title isEqualToString:@"账号"] || [title hasPrefix:@"账号"] ||
@@ -305,7 +470,7 @@ static BOOL DYStorageLooksLikeMainSettingsPage(NSArray *sections) {
             return YES;
         }
     }
-    return NO;
+    return sawStandalonePluginSection;
 }
 
 #pragma mark - Native settings-model construction
@@ -444,7 +609,7 @@ static BOOL DYStorageTitleMatchesCatalogEntry(NSString *title, NSDictionary *cat
 /// opens the same UI as tapping that plug-in in DYStorage.
 static NSDictionary<NSString *, NSDictionary *> *DYStorageInstalledSearchTargets(void) {
     DYStorageManager *manager = [DYStorageManager sharedManager];
-    NSArray<NSDictionary *> *catalog = DYStorageSearchCatalog();
+    NSArray<NSDictionary *> *catalog = DYStorageSearchCatalogMerged();
     NSMutableDictionary<NSString *, NSDictionary *> *targets = [NSMutableDictionary dictionary];
 
     for (id item in [manager capturedSettingsItems]) {
@@ -1406,7 +1571,7 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
     NSMutableArray<NSString *> *orderedPaths = [NSMutableArray array];
     NSUInteger resultIndex = 0;
 
-    for (NSDictionary *catalogEntry in DYStorageSearchCatalog()) {
+    for (NSDictionary *catalogEntry in DYStorageSearchCatalogMerged()) {
         NSString *plugin = catalogEntry[@"plugin"];
         NSDictionary *target = targets[plugin];
         DYStorageAction action = (DYStorageAction)target[@"action"];
@@ -1575,6 +1740,21 @@ static NSArray *DYStorageHubSections(void) {
             if (key.length) [seenKeys addObject:key];
 
             id displayItem = item;
+            NSString *captureTitle = DYStorageStringValue(item, @"title");
+            id captureActionObject = DYStorageValue(item, @"cellTappedBlock");
+            if (captureTitle.length &&
+                [NSStringFromClass([captureActionObject class]) containsString:@"Block"]) {
+                DYStorageAction originalCaptureAction = (DYStorageAction)[captureActionObject copy];
+                id captureItem = DYStorageMakeItem(DYStorageStringValue(item, @"identifier") ?: [@"capture:" stringByAppendingString:captureTitle],
+                                                   DYStorageStringValue(item, @"title") ?: captureTitle,
+                                                   DYStorageStringValue(item, @"detail") ?: @"",
+                                                   DYStorageStringValue(item, @"svgIconImageName") ?: DYStorageStringValue(item, @"iconImageName"),
+                                                   ^{
+                                                       DYStorageBeginPluginPageCapture(captureTitle);
+                                                       originalCaptureAction();
+                                                   });
+                if (captureItem) displayItem = captureItem;
+            }
             if (scanner.isScanning) {
                 NSString *title = DYStorageStringValue(item, @"title") ?: @"未命名插件";
                 NSString *identifier = DYStorageStringValue(item, @"identifier") ?: [@"scan:" stringByAppendingString:title];
@@ -1585,6 +1765,7 @@ static NSArray *DYStorageHubSections(void) {
                     DYStorageAction originalAction = (DYStorageAction)[actionObject copy];
                     id wrappedItem = DYStorageMakeItem(identifier, title, detail, iconName, ^{
                         [[DYStorageDeveloperScanner sharedScanner] selectPluginWithTitle:title];
+                        DYStorageBeginPluginPageCapture(title);
                         originalAction();
                     });
                     if (wrappedItem) displayItem = wrappedItem;
@@ -1620,6 +1801,40 @@ static NSArray *DYStorageHubSections(void) {
     if (registeredItems.count) {
         id registeredSection = DYStorageMakeSection(@"com.xlzs001.dystorage.registered", @"主动接入", registeredItems);
         if (registeredSection) [sections addObject:registeredSection];
+    }
+
+    NSArray *candidateSections = DYStorageCandidateSections();
+    if (candidateSections.count) {
+        NSMutableArray *candidateItems = [NSMutableArray array];
+        NSMutableSet<NSString *> *seenCandidates = [NSMutableSet set];
+        for (id section in candidateSections) {
+            for (id item in DYStorageArrayValue(section, @"itemArray")) {
+                NSString *title = DYStorageStringValue(item, @"title");
+                NSString *normalized = DYStorageNormalizedString(title);
+                if (normalized.length == 0 || [seenCandidates containsObject:normalized]) continue;
+                [seenCandidates addObject:normalized];
+                id candidateItem = DYStorageMakeItem([@"com.xlzs001.dystorage.candidate." stringByAppendingString:normalized],
+                                                     title,
+                                                     @"点击收纳这个入口 (返回设置页后生效)",
+                                                     @"ic_gearsimplify_outlined_20",
+                                                     ^{
+                    if (DYStorageConfirmPluginTitle(title)) {
+                        DYStorageLog(@"Confirmed plug-in entry: %@", title);
+                    }
+                    DYStorageRefreshHubController(DYStorageTopViewController(nil));
+                });
+                if (candidateItem) [candidateItems addObject:candidateItem];
+            }
+        }
+        if (candidateItems.count > 24) {
+            [candidateItems removeObjectsInRange:NSMakeRange(24, candidateItems.count - 24)];
+        }
+        if (candidateItems.count) {
+            id candidateSection = DYStorageMakeSection(@"com.xlzs001.dystorage.candidates",
+                                                       @"发现的插件入口",
+                                                       candidateItems);
+            if (candidateSection) [sections addObject:candidateSection];
+        }
     }
 
     if (developerUIEnabled) {
@@ -1786,9 +2001,11 @@ static NSArray *DYStorageOrganizedMainSections(id viewModel, NSArray *originalSe
     if (gDYStorageOrganizingMainSections) return originalSections;
 
     gDYStorageOrganizingMainSections = YES;
+    NSArray *result = originalSections;
     @try {
         NSMutableArray *finalSections = [NSMutableArray array];
         NSMutableArray *capturedItems = [NSMutableArray array];
+        NSMutableArray *candidateSections = [NSMutableArray array];
 
         for (id section in originalSections) {
             if (DYStorageSectionIsHub(section)) continue; // refresh our own count and action block
@@ -1801,6 +2018,12 @@ static NSArray *DYStorageOrganizedMainSections(id viewModel, NSArray *originalSe
             if (DYStorageIsStandalonePluginEntrySection(section, items)) {
                 if (items.count) [capturedItems addObjectsFromArray:items];
                 continue;
+            }
+
+            // Unconfirmed look-alikes stay where Douyin put them and are only
+            // offered as a suggestion on the organizer page.
+            if (DYStorageSectionLooksLikePluginEntryCandidate(section, items)) {
+                [candidateSections addObject:section];
             }
 
             if (items.count == 0) {
@@ -1845,6 +2068,8 @@ static NSArray *DYStorageOrganizedMainSections(id viewModel, NSArray *originalSe
             }
         }
 
+        DYStorageSetCandidateSections(candidateSections);
+
         if (capturedItems.count) {
             [[DYStorageManager sharedManager] captureSettingsItems:capturedItems];
             DYStorageLog(@"Captured %lu settings items", (unsigned long)capturedItems.count);
@@ -1855,10 +2080,16 @@ static NSArray *DYStorageOrganizedMainSections(id viewModel, NSArray *originalSe
             [finalSections insertObject:hubSection atIndex:0];
             gDYStorageHubInsertedOnMainSettings = YES;
         }
-        return finalSections;
+        result = finalSections;
+    } @catch (NSException *exception) {
+        // A malformed model from a third-party tweak must never take down
+        // Douyin's settings page: hand back the untouched data source instead.
+        DYStorageLog(@"Organizer aborted: %@", exception);
+        result = originalSections;
     } @finally {
         gDYStorageOrganizingMainSections = NO;
     }
+    return result;
 }
 
 #pragma mark - Delayed, selector-checked Logos installation
@@ -1870,15 +2101,22 @@ static void DYStorageInstallAvailableHooks(void);
 
 - (NSArray *)sectionDataArray {
     NSArray *sections = %orig;
-    // XUU hooks AWESettingsViewModel globally and can prepend its own section
-    // after DYStorage has built the hub model. Never show that duplicate on
-    // the organizer page; the preserved item already lives in our collection.
-    for (id section in sections) {
-        if (DYStorageSectionIsHubContent(section)) {
-            return DYStorageRemoveXUUFromHubSections(sections);
+    DYStorageCaptureFeaturesFromSections(sections);
+    @try {
+        // XUU hooks AWESettingsViewModel globally and can prepend its own section
+        // after DYStorage has built the hub model. Never show that duplicate on
+        // the organizer page; the preserved item already lives in our collection.
+        for (id section in sections) {
+            if (DYStorageSectionIsHubContent(section)) {
+                return DYStorageRemoveXUUFromHubSections(sections);
+            }
         }
+        return DYStorageOrganizedMainSections(self, sections);
+    } @catch (NSException *exception) {
+        // The settings table view must always get a usable array back.
+        DYStorageLog(@"sectionDataArray passthrough: %@", exception);
+        return sections;
     }
-    return DYStorageOrganizedMainSections(self, sections);
 }
 
 %end
@@ -1953,6 +2191,13 @@ static void DYStorageInstallAvailableHooks(void);
     DYStorageRefreshHubController((UIViewController *)self);
     DYStorageInstallAboutFooter((UIViewController *)self);
     DYStorageInstallAggregateSearch((UIViewController *)self);
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    DYStorageSearchCoordinator *appearanceCoordinator =
+        objc_getAssociatedObject(self, kDYStorageSearchCoordinatorAssociationKey);
+    [appearanceCoordinator hostAppearanceDidChange];
 }
 
 - (void)viewDidAppear:(BOOL)animated {

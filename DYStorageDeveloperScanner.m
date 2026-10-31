@@ -327,8 +327,9 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     } else if ([view isKindOfClass:[UISegmentedControl class]]) {
         UISegmentedControl *control = (UISegmentedControl *)view;
         NSMutableArray<NSString *> *segments = [NSMutableArray array];
-        for (NSInteger index = 0; index < control.numberOfSegments; index++) {
-            NSString *segment = [control titleForSegmentAtIndex:index];
+        NSUInteger segmentCount = control.numberOfSegments;
+        for (NSUInteger index = 0; index < segmentCount; index++) {
+            NSString *segment = [control titleForSegmentAtIndex:(NSInteger)index];
             if (segment.length) [segments addObject:segment];
         }
         text = [segments componentsJoinedByString:@" / "];

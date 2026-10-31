@@ -2,10 +2,12 @@ name: Build DYStorage
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 permissions:
-  actions: read
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -14,17 +16,19 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
-          submodules: true
           fetch-depth: 0
+
+      - name: Validate search catalog
+        run: python3 scripts/validate_catalog.py
 
       - name: Check Theos cache
         run: |
           echo "upstream_heads=$(git ls-remote https://github.com/roothide/theos | head -n 1 | cut -f 1)-$(git ls-remote https://github.com/theos/sdks | head -n 1 | cut -f 1)" >> "$GITHUB_ENV"
 
       - name: Use Theos cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ github.workspace }}/theos
           key: ${{ runner.os }}-${{ env.upstream_heads }}
@@ -44,94 +48,80 @@ jobs:
           done
 
       - name: Prepare Theos
-        uses: huami1314/theos-action@main
+        uses: huami1314/theos-action@c5ddc7728cc1bcac2f07ab65fbc3022d25ce0c10
 
       - name: Setup GNU Make
         run: echo "$(brew --prefix)/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
 
-      - name: Set incrementing package version
+      - name: Resolve package version
+        id: version
         run: |
           base_version="$(awk -F': ' '$1 == "Version" { print $2; exit }' control)"
-          base_prefix="${base_version%.*}"
-          build_version="${base_prefix}.${GITHUB_RUN_NUMBER}"
-          sed -i '' -E "s/^Version:.*/Version: ${build_version}/" control
-          sed -i '' -E "s#kDYStorageVersion = @\"[^\"]*\"#kDYStorageVersion = @\"${build_version}\"#" Tweak.xm
-          grep -Fxq "Version: ${build_version}" control
-          grep -Fq "kDYStorageVersion = @\"${build_version}\"" Tweak.xm
-          echo "Building DYStorage version ${build_version}"
-
-      - name: Clean packages directory
-        run: rm -rf packages && mkdir -p packages
-
-      - name: Build Rootful
-        run: |
-          rm -rf .theos
-          make package SCHEME=rootful FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
-          for f in packages/*.deb; do
-            [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-rootful.deb"
-          done
-
-      - name: Build Rootless
-        run: |
-          rm -rf .theos
-          make package SCHEME=rootless FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
-          for f in packages/*.deb; do
-            [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-rootless.deb"
-          done
-
-      - name: Build Roothide
-        run: |
-          rm -rf .theos
-          make package SCHEME=roothide FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
-          for f in packages/*.deb; do
-            [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-roothide.deb"
-          done
-
-      - name: Prepare package metadata
-        id: package
-        run: |
-          timestamp=$(TZ=Asia/Shanghai date +%Y%m%d%H%M%S)
-          version=$(awk -F': ' '$1 == "Version" { print $2; exit }' control)
-          if [ -z "$version" ]; then
-            echo "Unable to read package version from control" >&2
+          if [ -z "$base_version" ]; then
+            echo "control has no Version field" >&2
             exit 1
           fi
-          echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            build_version="${GITHUB_REF_NAME#v}"
+          else
+            build_version="${base_version%.*}.${GITHUB_RUN_NUMBER}"
+          fi
+          perl -0pi -e "s/^Version:.*/Version: ${build_version}/m" control
+          grep -Fxq "Version: ${build_version}" control
+          echo "build_version=${build_version}" >> "$GITHUB_OUTPUT"
+          echo "Building DYStorage ${build_version}"
 
-      - name: Verify Deb packages
-        shell: bash
+      - name: Build packages
         run: |
           set -euo pipefail
           shopt -s nullglob
-
-          deb_files=(packages/*.deb)
-          if [ "${#deb_files[@]}" -ne 3 ]; then
-            echo "Expected 3 Deb packages, found ${#deb_files[@]}:" >&2
-            printf '  %s\n' "${deb_files[@]}" >&2
-            exit 1
-          fi
-
+          rm -rf packages
+          mkdir -p packages
+          test -d "$GITHUB_WORKSPACE/theos"
           for scheme in rootful rootless roothide; do
-            scheme_files=(packages/*-"${scheme}".deb)
-            if [ "${#scheme_files[@]}" -ne 1 ]; then
-              echo "Expected exactly one ${scheme} package, found ${#scheme_files[@]}" >&2
-              exit 1
-            fi
+            rm -rf .theos
+            make package SCHEME="$scheme" FINALPACKAGE=1 -j"$(sysctl -n hw.ncpu)"
+            for deb in packages/*.deb; do
+              case "$deb" in
+                *-rootful.deb|*-rootless.deb|*-roothide.deb) continue ;;
+              esac
+              mv "$deb" "${deb%.deb}-${scheme}.deb"
+            done
           done
+          ls -l packages
 
-          printf 'Package artifact: %s\n' "${deb_files[@]}"
+      - name: Verify packages
+        env:
+          VERIFY_SCHEMES: rootful rootless roothide
+        run: python3 .github/scripts/verify_packages.py
 
       - name: Extract arm64 dylib
         env:
-          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.build_version }}
         run: bash .github/scripts/extract-release-dylib.sh
 
-      - name: Upload package artifacts
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: DYStorage-${{ steps.package.outputs.timestamp }}
+          name: DYStorage-${{ steps.version.outputs.build_version }}-${{ github.run_number }}
           path: |
             ${{ github.workspace }}/packages/*.deb
             ${{ github.workspace }}/packages/*.dylib
+          retention-days: 30
           if-no-files-found: error
+
+      - name: Publish tagged release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${{ steps.version.outputs.build_version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" packages/*.deb packages/*.dylib --clobber
+          else
+            gh release create "$tag" packages/*.deb packages/*.dylib \
+              --title "DYStorage ${version}" \
+              --notes-file RELEASE_NOTES.md
+          fi

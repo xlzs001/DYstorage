@@ -12,6 +12,9 @@ ifeq ($(SCHEME),roothide)
     export FINALPACKAGE = 1
 else ifeq ($(SCHEME),rootful)
     unexport THEOS_PACKAGE_SCHEME
+    # Keep the version string identical across schemes (otherwise a local
+    # rootful build appends Theos' -1 debug stage suffix).
+    export FINALPACKAGE = 1
 else ifeq ($(SCHEME),rootless)
     export THEOS_PACKAGE_SCHEME = rootless
     export FINALPACKAGE = 1
@@ -31,8 +34,12 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = DYStorage
 
-DYStorage_FILES = Tweak.xm DYStorageManager.m DYStorageDeveloperScanner.m DYStorageSearchCatalog.m DYStorageSearchCoordinator.m
-DYStorage_CFLAGS = -fobjc-arc -fobjc-arc-exceptions -Wno-deprecated-declarations -Wno-unguarded-availability
+DYStorage_FILES = Tweak.xm DYStorageManager.m DYStorageDeveloperScanner.m DYStorageSearchCatalog.m DYStorageSearchCoordinator.m DYStorageRuntimeIndex.m
+# control is the single source of truth for the version string: it is read at
+# build time and compiled in, so a local build can never drift from the package.
+DYSTORAGE_VERSION := $(shell awk -F': ' '$$1=="Version"{print $$2; exit}' $(THEOS_PROJECT_DIR)/control)
+
+DYStorage_CFLAGS = -fobjc-arc -fobjc-arc-exceptions -Wno-deprecated-declarations -Wno-unguarded-availability -DDYSTORAGE_VERSION_STRING='@"$(DYSTORAGE_VERSION)"'
 DYStorage_FRAMEWORKS = UIKit Foundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk

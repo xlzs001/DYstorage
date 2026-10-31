@@ -1,29 +1,40 @@
-# DYStorage 1.2.91 更新说明
+# DYStorage 1.3.0 更新说明
 
-## 聚合搜索与定位
+本版不改变收纳逻辑的使用方式，重点是构建/发布链路的正确性与设置页的健壮性。
 
-- 优化 DYYY 二级菜单路由，搜索结果可继续进入对应页面并定位功能。
-- 完善“抖音助手”和“抖音图层”的悬浮窗定位，支持根据功能名进入对应分类。
-- 悬浮窗分类点击只会在相应插件面板已显示时执行，避免误点 DYStorage 或抖音本身的同名项。
-- 搜索横向滑动会先退出搜索结果，再次返回才离开 DYStorage。
+## 新增功能
 
-## 性能与动画
+- 收纳提示：设置主页出现未收录的单项插件入口时，收纳页会新增「发现的插件入口」分组，点一下即加入收纳名单（写入 `DYStorageConfirmedPluginTitles`），不点则完全不动原始 section。
+- 本机学习索引：从收纳页打开插件后，DYStorage 记录该插件页的功能名称与分组（上限 400 条，窗口 8 秒，重新渲染顺延 4 秒），与静态目录合并供聚合搜索使用，解决「收纳了但搜不到」的问题。数据只存在本机 `NSUserDefaults` 的 `DYStorageRuntimeCatalogV1`。
+- 搜索栏深浅色自适应：按宿主背景亮度判定深浅，跟随抖音自身的深浅色开关与系统外观，不再出现深底深字。
+- README 增补「插件发现、索引与外观」一节，说明三个机制的判定条件、上限与清理方式。
 
-- 对未命中的离屏功能扫描进行缓存，总检查上限为 400 项，每个主线程批次最多构造 80 个离屏单元格。
-- 定位重试改为可取消的单链式调度，队列中同时只保留下一次检查，新搜索会使旧任务自动失效。
-- 重复高亮时会先清理上一层动画，不再叠加黄色遮罩。
-- 目标已在可见区域时不再额外滚动；滚动和高亮动画时长也已缩短。
-- 遵循 iOS“减弱动态效果”设置，开启后改用无过渡的短暂高亮。
+## 版本与打包
+
+- 版本号改为单一来源：`control` 的 `Version` 在编译时注入 `kDYSTORAGE_VERSION_STRING`，包内声明与设置页底部显示不再各写一份。
+- 修正 rootful 包的架构声明：此前 `control` 固定写 `iphoneos-arm64`，rootful 包被错误标记成 arm64；现在 rootful 产出 `iphoneos-arm`，rootless / roothide 仍为 `iphoneos-arm64`。
+- `control` 补充 `Depends: firmware (>= 14.0), mobilesubstrate` 与 `Homepage`，避免低版本系统直接安装。
+- CI 在打包后逐包核对架构、版本、依赖与 dylib 切片（arm64 + arm64e），不一致就失败，不再依赖肉眼检查。
 
 ## 稳定性
 
-- 取消悬浮窗分类的滞后异步点击，新搜索开始后，旧搜索不会继续操作页面。
-- 插件原始打开回调异常时会立即清理未完成定位任务，不会遗留后续扫描。
-- 保留开发者扫描器，普通用户界面默认隐藏，便于未来插件版本适配。
+- 设置页组装 `sectionDataArray` 时增加异常兜底：第三方插件返回异常模型时回退到原始数据，不再把异常抛给抖音设置页。
+- 主页判定增加兜底：当抖音调整「账号 / 账户」分组标题时，只要主页存在已知插件的单项根入口 section，「插件收纳」入口就不会静默消失。
+- 聚合搜索时按页脚实际高度回退 `contentInset.bottom`，清空搜索后恢复，搜索结果底部不再留出 112pt 空白色块。
+- 修复开发者扫描器遍历 `UISegmentedControl` 时的有符号比较警告，`-Wall -Wextra` 下可干净编译。
 
-## 构建与安装包
+## 目录与发布
 
-- GitHub Actions 仍为手动触发。
-- 单次构建产出 Rootful、Rootless 和 RootHide 三个 `.deb`，同时提供一个独立 `.dylib`；下载 `DYStorage-北京时间戳` 后解压即可直接看到这四个文件。
+- 新增 `scripts/validate_catalog.py`：构建前校验聚合搜索目录能否解析、插件名是否在 `DYStorageKnownPluginTitles` 中、标题是否为空，并报告重复标题。
+- 当前目录 6 个插件共 712 条功能；重复标题已记录为警告：DYKiller「清透玻璃」×4，DYYY「隐藏红包悬浮」×2、「隐藏评论搜索」×2。
+- 推送 `v*` 标签会自动构建并创建 GitHub Release，上传三个 `.deb` 与一个独立 `.dylib`；手动触发仍可用，artifact 保留 30 天。
+- 第三方 `theos-action` 固定到提交 `c5ddc77`，`actions/checkout` 升到 v7、`actions/cache` 升到 v6。
 
-> 本版已通过代码静态检查和 GitHub Actions 三格式构建验证；抖音及第三方插件均使用私有界面，具体页面跳转仍建议在实机安装后复核。
+## 清理
+
+- 删除不再参与编译的历史文件：`Tweak.x`、`DYPluginsViewController`、`DYPluginsMgr`、`DYPluginModel`、`DYPluginMgr.plist`。
+
+## 升级建议
+
+- 覆盖安装即可。rootful 设备请确认安装 `-rootful.deb`（`Architecture: iphoneos-arm`）。
+- 抖音与第三方插件均使用私有界面，具体页面跳转仍建议在实机复核。

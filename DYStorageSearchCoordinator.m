@@ -47,7 +47,10 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 - (NSString *)trimmedQuery;
 - (BOOL)isSearchInteractionActive;
 - (BOOL)isTopController;
+- (void)applyHostAppearance;
+- (BOOL)hostPrefersDarkAppearance;
 - (void)updateSupplementaryViewsForQuery:(NSString *)query;
+- (void)applyFooterInset:(BOOL)searching footer:(UIView *)footer;
 - (void)installNavigationInterceptors;
 - (void)updateNavigationGestureState;
 - (void)restoreNavigationGestureState;
@@ -132,6 +135,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     self.installedInsets = YES;
     [self installNavigationInterceptors];
     [self updateLayout];
+    [self applyHostAppearance];
     return YES;
 }
 
@@ -276,11 +280,39 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 
 - (void)updateSupplementaryViewsForQuery:(NSString *)query {
     BOOL searching = query.length > 0;
+    UIView *footer = nil;
     for (UIView *subview in self.controller.view.subviews) {
         if ([subview.accessibilityIdentifier isEqualToString:@"DYStorageAboutFooter"]) {
             subview.hidden = searching;
+            footer = subview;
+            break;
         }
     }
+    [self applyFooterInset:searching footer:footer];
+}
+
+/// The about footer reserves 112pt of bottom inset while it is visible. Hiding
+/// it during a search without releasing that inset left a blank strip under
+/// the last result, so the reserved space follows the footer's real height.
+- (void)applyFooterInset:(BOOL)searching footer:(UIView *)footer {
+    UITableView *tableView = self.tableView;
+    if (tableView == nil || self.installedInsets == NO) return;
+
+    CGFloat footerHeight = footer ? CGRectGetHeight(footer.bounds) : 0;
+    if (footer && footerHeight <= 0) footerHeight = 112;
+
+    UIEdgeInsets inset = self.originalContentInset;
+    if (searching && footerHeight > 0 && inset.bottom > 0) {
+        inset.bottom = MAX(0, inset.bottom - footerHeight);
+    }
+    if (UIEdgeInsetsEqualToEdgeInsets(tableView.contentInset, inset)) return;
+
+    tableView.contentInset = inset;
+    UIEdgeInsets indicatorInset = self.originalIndicatorInset;
+    if (searching && footerHeight > 0 && indicatorInset.bottom > 0) {
+        indicatorInset.bottom = MAX(0, indicatorInset.bottom - footerHeight);
+    }
+    tableView.scrollIndicatorInsets = indicatorInset;
 }
 
 - (void)refreshWithCurrentQuery {
@@ -404,6 +436,65 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
         tableView.contentInset = self.originalContentInset;
         tableView.scrollIndicatorInsets = self.originalIndicatorInset;
     }
+}
+
+
+#pragma mark - Host appearance
+
+// Douyin ships its own light/dark switch on top of iOS appearance, so the
+// system semantic colors this header used to rely on can end up as dark text on
+// a dark host background. Resolve the host background instead: it is the only
+// value that reflects what the user actually sees behind the field.
+- (BOOL)hostPrefersDarkAppearance {
+    UIColor *background = self.tableView.backgroundColor;
+    if (background == nil || CGColorGetAlpha(background.CGColor) < 0.05) {
+        background = self.controller.view.backgroundColor;
+    }
+    CGFloat red = 0.0, green = 0.0, blue = 0.0, alpha = 0.0;
+    if (background != nil && [background getRed:&red green:&green blue:&blue alpha:&alpha]) {
+        CGFloat luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        return luminance < 0.5;
+    }
+    return self.controller.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+}
+
+- (void)applyHostAppearance {
+    if (self.containerView == nil) return;
+    BOOL dark = [self hostPrefersDarkAppearance];
+    NSString *placeholder = self.searchTextField.attributedPlaceholder.string ?: self.searchTextField.placeholder;
+    if (placeholder.length == 0) placeholder = self.searchTextField.accessibilityLabel;
+
+    UIColor *textColor = dark ? UIColor.whiteColor : UIColor.labelColor;
+    UIColor *placeholderColor = dark ? [UIColor colorWithWhite:1.0 alpha:0.45] : UIColor.placeholderTextColor;
+    self.searchTextField.textColor = textColor;
+    self.searchTextField.tintColor = dark ? UIColor.whiteColor : UIColor.systemBlueColor;
+
+    if (dark) {
+        self.containerView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+        self.containerView.layer.shadowOpacity = 0.0;
+    } else {
+        self.containerView.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+        self.containerView.layer.shadowOpacity = 0.08;
+    }
+
+    UIImageView *icon = nil;
+    for (UIView *subview in self.searchTextField.leftView.subviews) {
+        if ([subview isKindOfClass:[UIImageView class]]) {
+            icon = (UIImageView *)subview;
+            break;
+        }
+    }
+    icon.tintColor = dark ? [UIColor colorWithWhite:1.0 alpha:0.55] : UIColor.secondaryLabelColor;
+
+    if (placeholder.length) {
+        self.searchTextField.attributedPlaceholder =
+            [[NSAttributedString alloc] initWithString:placeholder
+                                            attributes:@{ NSForegroundColorAttributeName: placeholderColor }];
+    }
+}
+
+- (void)hostAppearanceDidChange {
+    [self applyHostAppearance];
 }
 
 @end
