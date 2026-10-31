@@ -674,6 +674,17 @@ static NSUInteger gDYStoragePendingFloatingRouteIndex = 0;
 static NSString *gDYStoragePendingPlugin = nil;
 static BOOL gDYStorageFeatureScanHasMoreRows = NO;
 
+// A navigation row is invoked at most once per search so a plug-in that keeps
+// the same row on the pushed page cannot bounce the user in and out forever.
+static NSMutableSet<NSString *> *gDYStorageInvokedItemKeys = nil;
+static NSUInteger gDYStorageInvocationCount = 0;
+
+// State for the generic category walk used when a plug-in has no catalog route.
+static NSMutableArray<NSString *> *gDYStorageDescentQueue = nil;
+static NSMutableSet<NSString *> *gDYStorageDescentVisited = nil;
+static __weak UIViewController *gDYStorageDescentPage = nil;
+static NSInteger gDYStorageDescentDepth = 0;
+
 static BOOL DYStorageMotionEffectsEnabled(void) {
     return !UIAccessibilityIsReduceMotionEnabled();
 }
@@ -1182,15 +1193,25 @@ static BOOL DYStorageLocateFeatureInSettingsController(UIViewController *control
     if ([cellType isKindOfClass:[NSNumber class]] && cellType.integerValue == 26 &&
         [NSStringFromClass([actionObject class]) containsString:@"Block"]) {
         // Cell type 26 is the settings framework's tappable navigation/action
-        // row. Invoke the original callback so dialogs and child pages open at
-        // the same destination as a direct tap in the plug-in.
+        // row. Invoking it only opens the next page, so the pending search has
+        // to stay alive and let the retry loop look for the requested row on
+        // that page. Returning YES here used to stop the search one level early,
+        // which is why a hit inside a category never reached its own row.
+        NSString *invocationKey = [NSString stringWithFormat:@"%@|%@",
+                                   normalizedSection ?: @"", normalizedFeature ?: @""];
+        if (gDYStorageInvokedItemKeys == nil) gDYStorageInvokedItemKeys = [NSMutableSet set];
+        if ([gDYStorageInvokedItemKeys containsObject:invocationKey]) return YES;
+        if (gDYStorageInvocationCount >= 10) return YES;
+        [gDYStorageInvokedItemKeys addObject:invocationKey];
+        gDYStorageInvocationCount += 1;
+
         DYStorageAction action = [(DYStorageAction)actionObject copy];
         @try {
             action();
-            return YES;
         } @catch (__unused NSException *exception) {
             return NO;
         }
+        return NO;
     }
 
     UITableView *tableView = DYStorageFindTableView(controller.viewIfLoaded, 8);
@@ -1227,8 +1248,15 @@ static UITextField *DYStorageFindSettingsSearchField(UIView *view, NSInteger dep
         UITextField *field = (UITextField *)view;
         NSString *accessibility = DYStorageNormalizedString(field.accessibilityLabel);
         NSString *placeholder = DYStorageNormalizedString(field.placeholder);
+        // Douyin's own field is labelled "settings search"; most third-party
+        // plug-ins only label theirs "search". Accept both, otherwise the
+        // fallback below never fires outside the first-party page.
         BOOL settingsSearch = [accessibility containsString:@"设置搜索"] ||
-                              [placeholder containsString:@"搜索设置"];
+                              [placeholder containsString:@"搜索设置"] ||
+                              [accessibility containsString:@"搜索"] ||
+                              [placeholder containsString:@"搜索"] ||
+                              [accessibility containsString:@"search"] ||
+                              [placeholder containsString:@"search"];
         if (settingsSearch) return field;
     }
     for (UIView *subview in view.subviews) {
@@ -1431,6 +1459,73 @@ static BOOL DYStorageResolveFeatureInController(UIViewController *controller,
     return NO;
 }
 
+/// Rows that only push a child page inside a plug-in. Used when the static
+/// catalog has no route for a plug-in, which is the normal case outside DYYY.
+static NSArray<NSString *> *DYStorageNavigationCandidateTitles(UIViewController *controller,
+                                                                NSString *featureTitle) {
+    if (controller == nil || featureTitle.length == 0) return @[];
+    if (objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey)) return @[];
+    NSString *normalizedFeature = DYStorageNormalizedString(featureTitle);
+    id viewModel = DYStorageValue(controller, @"viewModel");
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    for (id section in DYStorageArrayValue(viewModel, @"sectionDataArray")) {
+        for (id item in DYStorageArrayValue(section, @"itemArray")) {
+            NSNumber *cellType = DYStorageValue(item, @"cellType");
+            if ([cellType isKindOfClass:[NSNumber class]] == NO || cellType.integerValue != 26) continue;
+            id actionObject = DYStorageValue(item, @"cellTappedBlock");
+            if ([NSStringFromClass([actionObject class]) containsString:@"Block"] == NO) continue;
+            NSString *title = DYStorageStringValue(item, @"title");
+            if (title.length == 0) continue;
+            if ([DYStorageNormalizedString(title) isEqualToString:normalizedFeature]) continue;
+            if (title.length > 24) continue;
+            if (DYStorageHeaderLooksLikeSystemGroup(title)) continue;
+            if ([titles containsObject:title] == NO) [titles addObject:title];
+        }
+    }
+    return titles;
+}
+
+/// Walks one level of plug-in category rows when the catalog route is empty.
+/// It never runs on the organizer page, never repeats a row, and pops back once
+/// when a group turns out not to contain the requested row.
+static void DYStorageTryDescendTowardsFeature(UIViewController *controller, NSString *featureTitle) {
+    if (controller == nil || featureTitle.length == 0) return;
+    if (controller == gDYStoragePendingSourceController) return;
+    if (gDYStorageDescentDepth >= 2) return;
+    // A plug-in that ships its own search box is served by the native search
+    // path, so do not open unrelated categories behind the user's back.
+    if (DYStorageFindSettingsSearchField(controller.viewIfLoaded, 16) != nil) return;
+
+    if (controller != gDYStorageDescentPage) {
+        gDYStorageDescentPage = controller;
+        gDYStorageDescentQueue = [DYStorageNavigationCandidateTitles(controller, featureTitle) mutableCopy];
+    }
+    if (gDYStorageDescentVisited == nil) gDYStorageDescentVisited = [NSMutableSet set];
+    NSString *pageKey = DYStorageNormalizedString(controller.title ?: controller.navigationItem.title);
+    while (gDYStorageDescentQueue.count > 0) {
+        NSString *candidate = gDYStorageDescentQueue.firstObject;
+        [gDYStorageDescentQueue removeObjectAtIndex:0];
+        NSString *key = [NSString stringWithFormat:@"%@|%@", pageKey ?: @"",
+                         DYStorageNormalizedString(candidate)];
+        if ([gDYStorageDescentVisited containsObject:key]) continue;
+        [gDYStorageDescentVisited addObject:key];
+        if (DYStorageInvokeSettingsNavigationItem(controller, candidate)) {
+            gDYStorageDescentDepth += 1;
+            gDYStorageDescentPage = nil;
+            DYStorageLog(@"Descend into %@ for %@", candidate, featureTitle);
+            return;
+        }
+    }
+    if (gDYStorageDescentDepth > 0) {
+        UINavigationController *navigationController = controller.navigationController;
+        gDYStorageDescentDepth -= 1;
+        gDYStorageDescentPage = nil;
+        if (navigationController != nil) {
+            [navigationController popViewControllerAnimated:NO];
+        }
+    }
+}
+
 static BOOL DYStorageTryLocateFeature(UIViewController *sourceController,
                                       NSString *section,
                                       NSString *title) {
@@ -1441,6 +1536,7 @@ static BOOL DYStorageTryLocateFeature(UIViewController *sourceController,
         return YES;
     }
     BOOL floatingPlugin = gDYStoragePendingFloatingRouteCandidates.count > 0;
+    if (floatingPlugin == NO) DYStorageTryDescendTowardsFeature(topController, title);
     if (DYStorageLocateFeatureInVisibleWindows(sourceController,
                                                gDYStoragePendingPlugin,
                                                title,
@@ -1494,6 +1590,43 @@ static void DYStorageResolvePendingFeatureForController(UIViewController *contro
     });
 }
 
+/// Short, non-blocking hint shown when the plug-in page was reached but the row
+/// could not be located. It keeps a partial result honest instead of leaving the
+/// user staring at an unchanged page.
+static void DYStorageShowLocateHint(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = DYStorageKeyWindow();
+        if (window == nil) return;
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+        label.text = @"\u5df2\u6253\u5f00\u63d2\u4ef6\u8bbe\u7f6e\uff0c\u672a\u80fd\u81ea\u52a8\u5b9a\u4f4d\u5230\u8fd9\u4e00\u9879";
+        label.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium];
+        label.textColor = UIColor.whiteColor;
+        label.textAlignment = NSTextAlignmentCenter;
+        label.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.78];
+        label.layer.cornerRadius = 10.0;
+        label.layer.masksToBounds = YES;
+        label.numberOfLines = 2;
+        [label sizeToFit];
+        CGRect frame = label.frame;
+        frame.size.width += 28.0;
+        frame.size.height += 16.0;
+        frame.origin.x = (CGRectGetWidth(window.bounds) - frame.size.width) / 2.0;
+        frame.origin.y = CGRectGetHeight(window.bounds) - frame.size.height - 96.0;
+        label.frame = frame;
+        label.alpha = 0.0;
+        [window addSubview:label];
+        [UIView animateWithDuration:0.18 animations:^{
+            label.alpha = 1.0;
+        } completion:^(__unused BOOL finished) {
+            [UIView animateWithDuration:0.35 delay:1.6 options:0 animations:^{
+                label.alpha = 0.0;
+            } completion:^(__unused BOOL finished) {
+                [label removeFromSuperview];
+            }];
+        }];
+    });
+}
+
 static void DYStorageScheduleFeatureRetry(UIViewController *sourceController,
                                           NSString *section,
                                           NSString *title,
@@ -1502,7 +1635,11 @@ static void DYStorageScheduleFeatureRetry(UIViewController *sourceController,
                                           NSUInteger generation) {
     if (generation != gDYStorageFeatureNavigationGeneration) return;
     if (intervalIndex >= intervals.count) {
+        UIViewController *topController = DYStorageTopViewController(nil);
+        BOOL leftTheOrganizer = topController != nil &&
+            topController != gDYStoragePendingSourceController;
         DYStorageClearPendingFeatureNavigation(generation);
+        if (leftTheOrganizer) DYStorageShowLocateHint();
         return;
     }
 
@@ -1547,6 +1684,12 @@ static void DYStorageOpenAndLocateFeature(UIViewController *sourceController,
         [DYStorageFloatingRouteCandidatesForFeature(plugin, title) copy];
     gDYStoragePendingFloatingRouteIndex = 0;
     gDYStoragePendingPlugin = [plugin copy];
+    gDYStorageInvokedItemKeys = [NSMutableSet set];
+    gDYStorageInvocationCount = 0;
+    gDYStorageDescentQueue = nil;
+    gDYStorageDescentVisited = [NSMutableSet set];
+    gDYStorageDescentPage = nil;
+    gDYStorageDescentDepth = 0;
     @try {
         openPlugin();
     } @catch (__unused NSException *exception) {
@@ -1558,7 +1701,8 @@ static void DYStorageOpenAndLocateFeature(UIViewController *sourceController,
     // result invalidates the generation, so old searches drain without leaving
     // a group of delayed scans on the main queue.
     NSArray<NSNumber *> *intervals = @[ @0.18, @0.24, @0.32, @0.42, @0.55,
-                                        @0.70, @0.85, @0.90, @0.90, @0.90 ];
+                                        @0.70, @0.85, @0.90, @0.90, @0.90,
+                                        @0.90, @0.90, @0.90, @0.90 ];
     DYStorageScheduleFeatureRetry(sourceController, section, title, intervals, 0, generation);
 }
 
