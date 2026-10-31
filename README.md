@@ -97,7 +97,7 @@ make package SCHEME=rootless
 ```sh
 make package SCHEME=rootful     # iphoneos-arm
 make package SCHEME=rootless    # iphoneos-arm64
-make package SCHEME=roothide    # iphoneos-arm64，需要 roothide/theos
+make package SCHEME=roothide    # iphoneos-arm64e (RootHide), needs roothide/theos
 ```
 
 `control` 里的 `Version` 是版本的唯一来源：Makefile 在编译时把它注入 `-DDYSTORAGE_VERSION_STRING`，因此包内声明与设置页底部显示的版本始终一致。发新版只需改这一处，并同步 `RELEASE_NOTES.md`。

@@ -12,7 +12,7 @@
 ## 版本与打包
 
 - 版本号改为单一来源：`control` 的 `Version` 在编译时注入 `kDYSTORAGE_VERSION_STRING`，包内声明与设置页底部显示不再各写一份。
-- 修正 rootful 包的架构声明：此前 `control` 固定写 `iphoneos-arm64`，rootful 包被错误标记成 arm64；现在 rootful 产出 `iphoneos-arm`，rootless / roothide 仍为 `iphoneos-arm64`。
+- 修正打包架构：rootful 产出 `iphoneos-arm`，rootless 为 `iphoneos-arm64`，roothide 为 `iphoneos-arm64e`；`control` 只声明基础架构，其余由 Theos 方案覆盖。
 - `control` 补充 `Depends: firmware (>= 14.0), mobilesubstrate` 与 `Homepage`，避免低版本系统直接安装。
 - CI 在打包后逐包核对架构、版本、依赖与 dylib 切片（arm64 + arm64e），不一致就失败，不再依赖肉眼检查。
 

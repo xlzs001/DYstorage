@@ -18,7 +18,13 @@ import sys
 import tarfile
 
 PACKAGES = pathlib.Path("packages")
-EXPECTED_ARCH = {"rootful": "iphoneos-arm", "rootless": "iphoneos-arm64", "roothide": "iphoneos-arm64"}
+# RootHide ships an arm64e package, rootless a plain arm64 one; both are
+# accepted for roothide so a Theos change does not break the release job.
+EXPECTED_ARCH = {
+    "rootful": ("iphoneos-arm",),
+    "rootless": ("iphoneos-arm64",),
+    "roothide": ("iphoneos-arm64e", "iphoneos-arm64"),
+}
 CPU_TYPE_ARM = 12
 CPU_TYPE_ARM64 = 12 | 0x01000000
 CPU_SUBTYPE_ARM64E = 2
@@ -119,8 +125,10 @@ def main():
                 fields[key.strip().lower()] = value.strip()
 
         arch = fields.get("architecture", "")
-        if arch != EXPECTED_ARCH[scheme]:
-            failures.append("%s: architecture is %r, expected %r" % (scheme, arch, EXPECTED_ARCH[scheme]))
+        expected = EXPECTED_ARCH[scheme]
+        if arch not in expected:
+            expected_text = " or ".join(expected)
+            failures.append("%s: architecture is %r, expected %s" % (scheme, arch, expected_text))
         if version and fields.get("version") != version:
             failures.append("%s: version is %r, expected %r" % (scheme, fields.get("version"), version))
         depends = fields.get("depends", "")
