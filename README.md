@@ -60,7 +60,7 @@ make package SCHEME=rootless
 # rootful
 make package SCHEME=rootful
 
-# roothide
+# roothide（需 roothide/theos；上游 Theos 默认不带该 package scheme）
 make package SCHEME=roothide
 ```
 
