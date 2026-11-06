@@ -66,8 +66,15 @@ make package SCHEME=roothide
 
 产物在 `packages/`，安装后**完全退出抖音**再打开（不是切后台，是从多任务里划掉）。
 
-当前发布包：`DYstorage_1.1.72_iphoneos-arm64.deb`。包标识仍为 `com.dpo.pluginnest`，
-`control` 已声明 `Conflicts/Replaces: com.xlzs001.dystorage`，安装时会替换旧 DYStorage。
+当前发布包（包标识仍为 `com.dpo.pluginnest`，`control` 已声明
+`Conflicts/Replaces: com.xlzs001.dystorage`，安装时会替换旧 DYStorage）：
+
+| 文件 | 适用环境 |
+| --- | --- |
+| `com.dpo.pluginnest_1.1.72_iphoneos-arm64-rootless.deb` | Dopamine / palera1n rootless / ElleKit |
+| `com.dpo.pluginnest_1.1.72_iphoneos-arm-rootful.deb` | unc0ver / checkra1n / 传统 rootful |
+| `com.dpo.pluginnest_1.1.72_iphoneos-arm64e-roothide.deb` | roothide Bootstrap |
+| `DYstorage_1.1.72.dylib` | 手动注入（arm64 + arm64e） |
 
 发布页：<https://github.com/xlzs001/DYstorage/releases>
 
