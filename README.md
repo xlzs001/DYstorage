@@ -1,121 +1,235 @@
-# DYStorage（抖音插件收纳）
+# DYstorage · 抖音插件收纳
 
-DYStorage 是注入抖音的 Theos tweak。它把兼容第三方插件散落在抖音“设置”主页的入口收进一个单独的“插件收纳”入口，同时保留原插件的点击回调，因此点进收纳页后仍然打开各插件原本的设置页面。
+把抖音设置页里**所有第三方插件入口**统一收进一个二级页：显示插件名 + 版本号、按插件分组、页内搜索，
+开关与插件自身设置页双向同步。
 
-这个项目的目标是**整理插件设置**，不是修改抖音官方“收藏夹”或上传任何作品数据。
+> 目标进程：`com.ss.iphone.ugc.Aweme`（抖音 Aweme）
+> 参考基线：DY40.9.0 头文件 + DYYY 开源实现
+> 构建：Theos / Logos，arm64 + arm64e，ARC
 
-## 做了什么
+---
 
-- 在抖音设置主页插入一个原生样式的“插件收纳” section；使用稳定的 identifier 防止重复插入。
-- 识别 DYYY（`huami1314/DYYY`当前都使用的独立 `DYYY` section）以及一组常见插件根入口。
-- 收纳 DYYY 等已知插件的**单项根入口 section**；对于混在普通 section 里的已知插件项，只有能安全复制原 section 时才剔除目标项，绝不原地改写其他 tweak 的模型。
-- 复用被收纳 `AWESettingItemModel` 的原始 `cellTappedBlock`，不需要猜测 DYYY 的设置控制器类名。
-- 提供可实际调用的运行时注册 API，供没有标准设置 section 的插件主动接入。
-- 收纳页顶部提供参考 DYYY 样式的聚合搜索框，可搜索已收纳插件的功能名称和分类：来源是审核过的静态目录，加上本机学到的插件页面数据；未安装的插件不会出现在结果中。
-- 聚合搜索目录来自开发者审核后的扫描数据，只保存功能名称与所属分类，不保存用户设置值或账号数据。
-- 收纳页底部显示版本、作者、版权和可点击的 GitHub 仓库地址。
-- 启动后在主线程延迟安装 Hook，让 `%orig` 通常能看到 DYYY 已经插入的 section；另有仅匹配“单项根入口”的 section-model 兜底，以处理后装载 Hook 追加的同类入口。
-- 首次打开某个已收纳插件页时，DYStorage 会顺带记录该页的功能名称与分组（上限 400 条，按标题去重），因此即使插件没有静态目录，收纳后点开一次也能被聚合搜索到；学习结果只写入本机 `NSUserDefaults` 的 `DYStorageRuntimeCatalogV1`。
-- 设置主页里发现疑似第三方插件入口时（单项 section、标题不是内置名单、也不是账号/通用/隐私一类系统分组），收纳页会把它们列在「发现的插件入口」下，点一下即确认收纳；未确认的入口一律留在原位，不改动其他 tweak 的模型。
-- 搜索栏按宿主背景亮度自适应深浅配色，跟随抖音自身的深浅色开关与系统外观切换，不再固定使用系统语义色。
+## 一、它解决什么问题
 
-正常使用时不会持续扫描 `UIWindow` / `UIView`，也不拦截悬浮球、不模糊匹配普通页面文本、不接管抖音的收藏网络请求。项目保留了显式启动的开发者扫描器，用于插件升级后的目录适配；其 UI 默认隐藏。
+装了 DYYY、抖增、净化之类的插件后，抖音设置页会被塞进一堆入口：
+有的挂在第一屏、有的自成一段、有的藏在二级页，名字还各不相同。
+DYstorage 做三件事：
 
-如需重新采集目录，可在抖音的 `NSUserDefaults` 中临时设置 `DYStorageDeveloperMode=YES`，重启抖音后“开发者扫描”入口才会显示。采集完成后删除该键或设为 `NO` 即可恢复隐藏。
+1. **收**：把第三方插件注册到设置页的每一行都摘出来，原位置只留一行「插件」；
+2. **归**：按「插件」分组，显示插件名 + 版本号（来自 dpkg），一个功能只属于一个插件；
+3. **找**：搜索功能当前封存：点顶部搜索胶囊只提示「下次一定」，请在插件列表里按插件翻阅。
 
-## 兼容性与边界
+---
 
-抖音的 `AWESettingsViewModel`、`AWESettingItemModel`、`AWESettingSectionModel` 都是私有实现，任何抖音版本升级都可能改变它们。DYStorage 在运行时检查类和 selector，缺少目标时不会安装对应 Hook；这避免了直接崩溃，但不能替代真机验证。
+## 二、功能清单
 
-目前主页判定优先看“账号 / 账户 / Account / General”等根设置 section，也会尝试 section identifier 中的 `account` / `setting` 组合；此外，只要主页存在已知插件的单项根入口 section，同样认定为设置主页，避免抖音调整分组标题后收纳入口静默消失。这与 `huami1314/DYYY` 的“账号”保护一致，但比无条件向所有 `AWESettingsViewModel` 注入更保守。
+| 能力 | 说明 |
+| --- | --- |
+| 通用收纳 | 不依赖关键字白名单，按「设置项由哪个 dylib 创建」判定归属，新插件无需适配 |
+| 名称 + 版本 | 从 dpkg `status` + `info/*.list` 反查包名与版本；读不到时显示「版本未知」 |
+| 一一对应 | 每个功能归属唯一插件，重复注入的副本会被去重 |
+| 搜索 | 当前封存：点搜索胶囊提示「下次一定」，不提供查询与结果页 |
+| 深层索引 | 打开过某个插件的子设置页后，**该页自己的**功能也会进入索引（150 条/页、总计最多 2000 条，跨启动持久化） |
+| 开关同步 | 收纳页卡片打开插件页、功能行拨开关 = 调插件自己的 `switchChangedBlock`，并回写 `isSwitchOn`、刷新原 cell |
+| 状态回读 | 从插件自己的设置页返回时，重新抓取最新实例，开关状态不会错位 |
+| 动画 | 卡片按压微缩放、行按压微缩放、开关触感反馈 |
 
-默认被动收纳名单在 [`Tweak.xm`](Tweak.xm) 的 `DYStorageKnownPluginTitles` 中。高级用户可在进程的 `NSUserDefaults` 中以字符串数组设置 `DYStorageTargetPluginTitles`，添加自己已验证的**设置根入口标题**；不要填写泛化词，例如“设置”或“助手”。
+---
 
-## 插件发现、索引与外观
+## 三、交互路径
 
-三个机制都围绕同一个前提：DYStorage 不猜类名、不改写别人的模型，只在用户确认或用户实际打开页面之后才记录数据。
+```
+抖音「我」→ 右上角设置
+        └─ 第一段顶部：插件  3 个插件
+              └─ 收纳页（按插件分组的卡片列表）
+                    ├─ 顶部搜索胶囊 → 提示「下次一定」（搜索当前封存）
+                    ├─ 插件卡片：图标 + 名称 + v版本号 + 入口标题
+                    └─ 点卡片：执行该插件自己的入口回调，打开它的设置页
 
-- 收纳标题的来源依次是内置名单 `DYStorageKnownPluginTitles`、`NSUserDefaults` 里的 `DYStorageTargetPluginTitles`，以及用户在收纳页点选的候选入口；点选结果写入 `DYStorageConfirmedPluginTitles`，重启抖音后按普通插件处理。
-- 候选入口只是建议，不会自动搬走任何 section。判定条件见 `DYStorageSectionLooksLikePluginEntryCandidate`：单项 section、item 带有 `cellTappedBlock`、标题不在确认名单内、header 不是系统分组；同一批最多展示 24 条。
-- 学习索引在用户从收纳页进入插件页时启动，窗口 8 秒，插件页重新渲染会顺延 4 秒，最多记录 400 条。回到收纳页或点开另一个入口会立刻结束这次采集，收纳页自身的数据永远不会被计入。
-- 搜索栏的深浅色取宿主 `backgroundColor` 的亮度（`0.2126r + 0.7152g + 0.0722b < 0.5` 判为深色），拿不到颜色时才退回 `traitCollection`，原因是抖音的深浅色开关独立于 iOS 外观。
+运行日志：收纳页标题连点五次进入（导出、清空）；诊断：列表为空时点「查看诊断」
+```
 
-删除 `DYStorageRuntimeCatalogV1` 或重装即可清空学习结果；静态目录仍然优先，学习到的同名标题不会覆盖审核过的条目。
+---
 
-## 给插件作者的主动接入方式
+## 四、安装
 
-首选注册一个负责展示你自己设置页的 block。不要把控制器或 view model 对象保存到全局；只在用户点击时创建或展示它。
+```bash
+# rootless（Dopamine / palera1n rootless / ElleKit）
+make package SCHEME=rootless
 
-DYStorage 没有要求其他 tweak 链接它。下面的 Logos / Objective-C 示例通过运行时调用，DYStorage 未安装时会自然跳过：
+# rootful
+make package SCHEME=rootful
+
+# roothide
+make package SCHEME=roothide
+```
+
+产物在 `packages/`，安装后**完全退出抖音**再打开（不是切后台，是从多任务里划掉）。
+
+当前发布包：`DYstorage_1.1.72_iphoneos-arm64.deb`。包标识仍为 `com.dpo.pluginnest`，
+`control` 已声明 `Conflicts/Replaces: com.xlzs001.dystorage`，安装时会替换旧 DYStorage。
+
+卸载：
+
+```bash
+dpkg -r com.dpo.pluginnest
+```
+
+---
+
+## 五、实现要点
+
+### 1. 怎么判断「这一行是插件塞的」
+
+不猜标题关键字，而是看这个设置项的 `cellTappedBlock` / `switchChangedBlock`
+**函数指针落在哪个 Mach-O 镜像里**：
 
 ```objc
-%ctor {
-    Class managerClass = NSClassFromString(@"DYStorageManager");
-    SEL sharedSelector = NSSelectorFromString(@"sharedManager");
-    if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return;
-
-    id manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector);
-    SEL registerSelector = NSSelectorFromString(@"registerActionWithIdentifier:title:version:action:");
-    if (![manager respondsToSelector:registerSelector]) return;
-
-    NSString *identifier = @"com.example.my-tweak";
-    NSString *title = @"我的插件";
-    NSString *version = @"1.0.0";
-    void (^openSettings)(void) = ^{
-        // 在主线程创建并展示你的设置控制器。
-    };
-
-    NSMethodSignature *signature = [manager methodSignatureForSelector:registerSelector];
-    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-    invocation.target = manager;
-    invocation.selector = registerSelector;
-    [invocation setArgument:&identifier atIndex:2];
-    [invocation setArgument:&title atIndex:3];
-    [invocation setArgument:&version atIndex:4];
-    [invocation setArgument:&openSettings atIndex:5];
-    [invocation invoke];
-}
+// Block_layout.invoke → dladdr() → dli_fname
+NSString *image = DPOPluginImageForItem(item);
 ```
 
-可用的接口定义见 [`DYStorageManager.h`](DYStorageManager.h)：
+- 落在 `/var/jb/Library/MobileSubstrate/DynamicLibraries/…`、`/var/jb/usr/lib/TweakInject/…`、
+  `/Library/MobileSubstrate/…` → 第三方插件；
+- 落在 `Aweme.app/Frameworks/*.dylib`（独立注入的插件，常见于插件加载器）→ 第三方插件；
+- 落在 `Aweme.app` 内的 `.framework/`、`AwemeCore`、`/System/Library`、注入框架本身 → 不动。
 
-- `registerActionWithIdentifier:title:version:action:`
-- `registerControllerWithIdentifier:title:version:controller:`
-- `registerActionWithTitle:version:action:`（兼容没有稳定 identifier 的旧集成）
-- `unregisterPluginWithIdentifier:`
+这样官方项永远不会被误收，新插件也不需要往白名单里加名字。
 
-## 构建
+少数纯展示行没有 block，则用「同插件已知 identifier 前缀」兜底归属。
 
-本地需要 Theos、iOS SDK 与 `ldid`。默认是 rootless 方案：
+### 2. 为什么每次都要重新取 item
 
-```sh
-make package SCHEME=rootless
+抖音设置页每次刷新都会重新生成 `AWESettingItemModel`，插件的 `cellTappedBlock`
+里往往弱引用了当时的控制器。收纳页只保存**当次最新实例**，并在
+`viewWillAppear` 时重新触发一次 `sectionDataArray`，避免点到已销毁的上下文。
+
+执行插件回调时做一次「上下文重定向」：临时把 `viewModel.controllerDelegate`
+指向当前控制器，1 秒后确认仍是我们再还原，兼顾 push 与 present 两条路径。
+
+### 3. 版本号从哪来
+
+```
+/var/jb/var/lib/dpkg/status          → Package / Name / Version
+/var/jb/var/lib/dpkg/info/*.list      → dylib 路径 → 归属包
 ```
 
-三种安装方式分别构建：
+拿到 dylib 文件名后在 `.list` 里反查包名，再回 `status` 取版本。
+结果会缓存到 `com.dpo.pluginnest` 偏好里，第二次启动直接命中。
 
-```sh
-make package SCHEME=rootful     # iphoneos-arm
-make package SCHEME=rootless    # iphoneos-arm64
-make package SCHEME=roothide    # iphoneos-arm64e (RootHide), needs roothide/theos
+沙盒读不到 dpkg、或插件是手动注入（没有 deb 包）时，显示「版本未知」，
+可以手动补：
+
+```xml
+<!-- /var/mobile/Library/Preferences/com.dpo.pluginnest.overrides.plist -->
+<dict>
+    <key>DYYY.dylib</key>
+    <dict>
+        <key>name</key><string>DYYY</string>
+        <key>version</key><string>1.2.3</string>
+    </dict>
+</dict>
 ```
 
-`control` 里的 `Version` 是版本的唯一来源：Makefile 在编译时把它注入 `-DDYSTORAGE_VERSION_STRING`，因此包内声明与设置页底部显示的版本始终一致。发新版只需改这一处，并同步 `RELEASE_NOTES.md`。
+### 4. 开关同步
 
-`FINALPACKAGE=1` 用于去掉包名后的修订后缀，本地调试可省略。
+```objc
+item.isSwitchOn = enabled;      // 先写模型
+item.switchChangedBlock(enabled); // 再回放插件逻辑
+[item refreshCell];             // 让抖音原设置页的开关也跟着变
+```
 
-## 发布
+从插件页返回时重新抓取，插件自己改过的状态会覆盖回来，不存在两边不一致。
 
-推送 `v*` 标签会触发 GitHub Actions，一次构建三个方案的 `.deb` 与一个独立 `.dylib`，校验后自动创建 Release 并上传；也可以在 Actions 页面手动触发，产物作为 artifact 保留 30 天。
+---
 
-CI 打包前运行 `python3 scripts/validate_catalog.py` 校验聚合搜索目录（JSON 可解析、插件名与 `DYStorageKnownPluginTitles` 一致、无空标题，并报告重复标题），打包后运行 `.github/scripts/verify_packages.py` 核对三个包的架构、版本、依赖与 dylib 切片。版本解析在 tag 构建时取标签名，手动触发时取 `control` 的主版本号加运行编号。
+## 六、排查「入口没被收走」
 
-## 目录维护
+列表为空时点「查看诊断」会列出本次扫描到的每一个设置项：
 
-`DYStorageSearchCatalog.m` 是内置开发者扫描器导出的静态目录，不是运行时抓取。第三方插件更新后，用扫描器重新导出，替换该文件里的 JSON 串，再跑一次 `scripts/validate_catalog.py`；若目录里的插件名发生变化，同步更新 `Tweak.xm` 中的 `DYStorageKnownPluginTitles`。
+- `归属`：最终判定属于哪个插件（dylib 文件名）；
+- `block`：`cellTappedBlock` 的 invoke 落在哪个镜像；
+- `class`：`cellControllerClass` / `bizViewModelClass`；
+- `已收纳 / 未识别 / 重复`：判定结果。
 
-## 参考
+右上角「复制」可把整份诊断拷到剪贴板。排查时优先看两类：
 
-实现思路参考了 [huami1314/DYYY](https://github.com/huami1314/DYYY) 的设置入口 Hook：两者都会构建独立的 `AWESettingSectionModel` 并插入 `AWESettingsViewModel.sectionDataArray` 的首位。DYStorage 没有复制其设置页代码；它只保留已生成 entry 的原始回调。
+1. **列表里根本没有这个入口** → 它不在 `sectionDataArray` 里，属于非标准注入（自定义 View），当前版本不支持；
+2. **有这个入口但「未识别」** → 看 `block` / `class` 是否为空：
+   - 都为空：这个 item 是纯数据行，只能靠 dylib 文件名兜底，可在 `overrides` 里补，或把 dylib 名告诉开发者；
+   - 有值但路径奇怪：把路径发出来，补进镜像判定规则即可。
 
-本项目采用 [MIT License](LICENSE)。
+## 七、运行日志（排查用）
+
+收纳页标题连点五次进入运行日志（诊断页左上角也有「日志」）：
+
+- **导出**：调系统文稿选择器，把 `.log` 文件存到「文件」或分享；
+- **复制**：整份日志进剪贴板；
+- 日志同时落盘在 `/var/mobile/Library/Preferences/com.dpo.pluginnest.log`
+  （写不进去时退回 App 临时目录，页面底部会显示真实路径）。
+
+记录内容：
+
+```
+BOOT    版本号、pid
+HOOK    挂了哪些类/方法、失败原因
+MAINVM  主设置页 VM 实例登记
+HARVEST 每轮扫描的 VM / section 数 / 收走数量
+ITEM    每个设置项的标题、id、block 镜像、是否宿主、判定结果
+RESCAN  补扫前后功能数与收走次数、是否 reload
+ACT     点击了哪个功能、用什么上下文、是否执行成功
+TOGGLE  开关切换
+PKG     dylib → 包名/版本解析结果
+CRASH   未捕获异常 + 调用栈
+```
+
+## 八、调试
+
+```bash
+# 终端启动抖音并打开日志
+DPO_DEBUG=1 open com.ss.iphone.ugc.Aweme
+# 或
+killall -9 Aweme; DPO_DEBUG=1 /var/jb/usr/bin/Aweme
+```
+
+日志前缀 `[PluginNest]`，会打印：
+
+- 挂在哪个类的 `sectionDataArray`
+- 本轮收纳了多少条
+- 执行插件回调 / 开关回调时的异常
+
+---
+
+## 九、已知限制
+
+1. **只处理走 `AWESettingBaseViewModel.sectionDataArray` 的入口**。极少数插件直接把
+   自定义 View 塞进设置页（不走 item 模型），这类无法摘取。
+2. **深层索引依赖标准设置页模型**：插件子页若不是用 `AWESettingSectionModel` 构建，
+   子功能不会进索引（顶层入口仍可正常收纳与搜索）。
+3. **深层项点击只打开插件页、不定位到行**：`locatorPage/locatorIndex/locatorTrail` 已落盘，
+   定位与高亮还没接（P3）。
+4. **静态索引未启用**：插件页从未打开过时，只有顶层入口可搜；要覆盖插件内部功能名需加
+   dylib 字符串扫描（P2）。
+5. **版本号依赖 dpkg 可读**；沙盒限制或手动安装时显示「版本未知」，可用 overrides 补。
+6. 插件把自己的入口做成「纯展示、无 block、无 identifier」时无法判定归属，会留在原位置。
+
+---
+
+## 十、目录结构
+
+```
+DYstorage/
+├── Tweak.x                          # 唯一 hook 点 + 安装调度
+├── DPOCommon.h                      # 抖音私有类声明（只声明，不引用类符号）
+├── DPORuntime.{h,m}                 # 类查找 / 顶层 VC / block 镜像 / 拼音 / 触感
+├── DPOTheme.{h,m}                   # 视觉常量
+├── DPOModel.{h,m}                   # 功能 / 插件 / 仓库 / 搜索排序
+├── DPOPackageResolver.{h,m}         # dylib → 包名 + 版本
+├── DPOHarvester.{h,m}               # 摘取、分组、入口行、执行回调
+├── DPOViews.{h,m}                   # 功能行 / 分组头 / 空状态 / Toast
+├── DPODiagnostics.{h,m}             # 归属诊断列表（排查漏收）
+├── DPOLogCenter.{h,m}               # 运行日志（缓冲 + 落盘 + 崩溃捕获）
+├── DPOLogViewController.{h,m}       # 日志查看 / 分享
+├── DPOOrganizerViewController.{h,m} # 收纳页
+└── DPOPluginDetailViewController.{h,m} # 插件详情（当前未被引用）
+```

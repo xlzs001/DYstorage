@@ -1,10 +1,12 @@
-Package: com.xlzs001.dystorage
-Name: DYStorage
-Version: 1.3.2
+Package: com.dpo.pluginnest
+Name: DYstorage
+Version: 1.1.72
 Architecture: iphoneos-arm
-Description: Organizes compatible third-party Douyin tweak settings in one entry.
-Maintainer: DYStorage Contributors
-Author: DYStorage Contributors
+Description: 把抖音设置页里散落的第三方插件入口收进「DYstorage」二级页：保留原插件回调、按插件分组显示名称与版本号；搜索功能当前封存。
+Maintainer: DYstorage
+Author: DYstorage
 Section: Tweaks
 Depends: firmware (>= 14.0), mobilesubstrate
-Homepage: https://github.com/xlzs001/DYstorage
+Conflicts: com.xlzs001.dystorage
+Replaces: com.xlzs001.dystorage
+Homepage: https://github.com/xlzs001/DYStorage
