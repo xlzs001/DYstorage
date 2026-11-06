@@ -9,4 +9,4 @@ Section: Tweaks
 Depends: firmware (>= 14.0), mobilesubstrate
 Conflicts: com.xlzs001.dystorage
 Replaces: com.xlzs001.dystorage
-Homepage: https://github.com/xlzs001/DYStorage
+Homepage: https://github.com/xlzs001/DYstorage

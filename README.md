@@ -69,6 +69,8 @@ make package SCHEME=roothide
 当前发布包：`DYstorage_1.1.72_iphoneos-arm64.deb`。包标识仍为 `com.dpo.pluginnest`，
 `control` 已声明 `Conflicts/Replaces: com.xlzs001.dystorage`，安装时会替换旧 DYStorage。
 
+发布页：<https://github.com/xlzs001/DYstorage/releases>
+
 卸载：
 
 ```bash

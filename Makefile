@@ -1,5 +1,5 @@
 # =============================================================================
-#  PluginNest（插件收纳）—— 抖音第三方插件入口统一收纳 + 全局功能搜索
+#  DYstorage（抖音插件收纳）—— 第三方插件入口统一收纳
 #
 #  默认 rootless（Dopamine / palera1n rootless / ElleKit），可切换：
 #     make package SCHEME=rootful
